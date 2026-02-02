@@ -28,6 +28,7 @@
 #include "corax/tree/treeinfo.h"
 #include "opt_branches.h"
 #include "opt_model.h"
+#include <limits.h>
 
 static void fill_rates(double *     rates,
                        double *     x,
@@ -1515,8 +1516,13 @@ double corax_algo_opt_rates_weights_treeinfo(corax_treeinfo_t *treeinfo,
 }
 
 
+unsigned int target_func_calls = 0;
 double target_func_brent_all_freerate(void *data, double *rates, double *likelihoods, int *converged) {
     corax_opt_multipart_em_data_t *em_data = (corax_opt_multipart_em_data_t *) data;
+
+
+    //printf("Brent target function call number %u\n", target_func_calls);
+    ++target_func_calls;
 
     // Copy rates to treeinfo
     for (unsigned int p = 0U; p < em_data->treeinfo->partition_count; ++p) {
@@ -1529,9 +1535,11 @@ double target_func_brent_all_freerate(void *data, double *rates, double *likelih
         for (unsigned int c = 0; c < part->rate_cats; ++c) {
             unsigned int offset = em_data->prefix_sum_category_count[p] + c;
 
+            #ifndef DEBUG
             if (converged && converged[offset])  {
                 continue;
             }
+            #endif
 
             if (rates) {
                 part->rates[c] = rates[offset];
@@ -1543,8 +1551,19 @@ double target_func_brent_all_freerate(void *data, double *rates, double *likelih
     // Evaluate per-site per-category likelihood
     const double overall_loglh = corax_treeinfo_compute_loglh_sitecat(em_data->treeinfo, 0, 1, em_data->sitecat_lh_per_part);
 
+    #ifdef DEBUG
+    double *ref_persite_lnl = (double *) calloc(em_data->pattern_weight_sum_per_part[0], sizeof(double));
+    double **ref_persite_lnl_part = &ref_persite_lnl;
+    const double recomputed_loglh = corax_treeinfo_compute_loglh_persite(em_data->treeinfo, 0, 1, ref_persite_lnl_part);
+    assert(recomputed_loglh == overall_loglh);
+    #endif
+
     // Compute likelihood sum weighted with posterior
     memset(em_data->category_lh, 0, sizeof(double) * em_data->total_rate_cats);
+#ifdef DEBUG
+    double dbg_summed_lnl = 0.;
+#endif
+
     for (unsigned int p = 0U; p < em_data->treeinfo->partition_count; ++p) {
         if (!(em_data->treeinfo->params_to_optimize[p] & CORAX_OPT_PARAM_FREE_RATES)) {
                 continue;
@@ -1553,45 +1572,84 @@ double target_func_brent_all_freerate(void *data, double *rates, double *likelih
         corax_partition_t *part = em_data->treeinfo->partitions[p];
         
         double *this_sitecat_lh = em_data->sitecat_lh_per_part[p];
+
         for (unsigned int i = 0; i < part->sites; ++i) {
+            #ifdef DEBUG
+            unsigned int dbg_site_scalings = INT_MAX;
+            double dbg_terma = 0.;
+            for (unsigned int c = 0; c < part->rate_cats; ++c)  {
+                dbg_site_scalings = CORAX_MIN(dbg_site_scalings, corax_retrieve_root_edge_scalings(em_data->treeinfo, part, i, c));
+            }
+            #endif
+
+
             for (unsigned int c = 0; c < part->rate_cats; ++c) {
                 const unsigned int scalings = corax_retrieve_root_edge_scalings(em_data->treeinfo, part, i, c);
-                unsigned int offset = em_data->prefix_sum_category_count[p] + c;
+                const unsigned int offset = em_data->prefix_sum_category_count[p] + c;
+                #ifndef DEBUG
                 if (converged && converged[offset]) continue; // TODO: check if this conditional inside the loop makes it faster
+                #endif
 
-
-                double term_inv = 0;
-                if (part->prop_invar[0] > 0.0 && part->invariant && part->invariant[i] != -1) {
-                    int site_state = part->invariant[i];
-                    term_inv = part->prop_invar[0] \
-                             * part->rate_weights[c] \
-                             * part->frequencies[em_data->treeinfo->param_indices[p][c]][site_state];
+                #ifdef DEBUG
+                double dbg_scale_factor = 1.0;
+                if (part->attributes & CORAX_ATTRIB_RATE_SCALERS) {
+                    unsigned int capped_scalings =  CORAX_MIN(CORAX_SCALE_RATE_MAXDIFF, scalings - dbg_site_scalings);
+                    dbg_scale_factor = pow(CORAX_SCALE_THRESHOLD, capped_scalings);
                 }
+                dbg_terma += (1. - part->prop_invar[0]) * part->rate_weights[c] * this_sitecat_lh[c] * dbg_scale_factor;
+                //printf("terma += %e\n", (1. - part->prop_invar[0]) * part->rate_weights[c] * this_sitecat_lh[c] * dbg_scale_factor);
+                #endif
 
-                double site_lnL;
 
-                double terma = (1. - part->prop_invar[0]) * this_sitecat_lh[c];
-
-
-                if (scalings > 0) {
-                    assert(term_inv == 0.);
-                    if (term_inv > 0.0) {
-                        site_lnL = log(terma * pow(CORAX_SCALE_THRESHOLD, scalings) + term_inv);
-                    } else {
-                        site_lnL = log(terma) + scalings * log(CORAX_SCALE_THRESHOLD);
-                    }
-                } else {
-                    site_lnL = log(terma);
-                }
+                const double site_lnL = log(this_sitecat_lh[c]) + scalings * log(CORAX_SCALE_THRESHOLD);
 
                 //printf("brent site %i category %i terma %e terminv %e scalings %u site lnL %f\n", i, c, terma, term_inv, scalings, site_lnL);
 
                 em_data->category_lh[offset] += em_data->sitecat_posterior_per_part[p][i * part->rate_cats + c] * site_lnL;
             }
 
+            #ifdef DEBUG
+            const unsigned int w = part->pattern_weights[i];
+            double dbg_term_inv = 0.;
+            double dbg_siteLoglh = 0;
+            if (part->prop_invar[0] > 0.0 && part->invariant && part->invariant[i] != -1) {
+                int site_state = part->invariant[i];
+                for (unsigned int c= 0; c < part->rate_cats; ++c) {
+                    dbg_term_inv += part->prop_invar[0] \
+                             * part->rate_weights[c] \
+                             * part->frequencies[em_data->treeinfo->param_indices[p][c]][site_state];
+
+                }
+            }
+            if (dbg_site_scalings > 0) {
+                if (dbg_term_inv > 0.) {
+                    dbg_siteLoglh = w *log(dbg_terma * pow(CORAX_SCALE_THRESHOLD, dbg_site_scalings) + dbg_term_inv);
+                } else {
+                    dbg_siteLoglh = w * (log(dbg_terma) + dbg_site_scalings * log(CORAX_SCALE_THRESHOLD));
+                }
+            } else {
+                dbg_siteLoglh = w * log(dbg_terma + dbg_term_inv);
+            }
+            if (fabs(dbg_siteLoglh - ref_persite_lnl[i]) > 1e-3) {
+                printf("brent_target part %i site %i ref lnL %f computed lnL %f terma %e terminv %e scalings %u\n", p, i, ref_persite_lnl[i], dbg_siteLoglh, dbg_terma, dbg_term_inv, dbg_site_scalings);
+            }
+            dbg_summed_lnl += dbg_siteLoglh;
+            #endif
+
             this_sitecat_lh += part->rate_cats;
         }
     }
+
+#ifdef DEBUG
+    if (fabs(dbg_summed_lnl - overall_loglh) > 1e-3) {
+        printf("brent_target summed != overall (%f ≠ %f)\n", dbg_summed_lnl, overall_loglh);
+        abort();
+    } else {
+        printf("brent match\n");
+    }
+
+    free(ref_persite_lnl);
+#endif
 
     // Compute sum across all PEs
     corax_treeinfo_parallel_reduce(em_data->treeinfo,
@@ -1634,6 +1692,7 @@ double corax_algo_opt_rates_weights_em_treeinfo(corax_treeinfo_t *treeinfo,
                                                 double bfgs_factor,
                                                 double tolerance,
                                                 corax_bool_t use_brent) {
+printf("tolerance brent = %e\n", tolerance);
   const corax_bool_t use_bfgs = !use_brent;
   const double factor = bfgs_factor > 0. ? bfgs_factor : CORAX_ALGO_BFGS_FACTR;
 
@@ -1763,7 +1822,7 @@ double corax_algo_opt_rates_weights_em_treeinfo(corax_treeinfo_t *treeinfo,
   fix_free_rates(treeinfo, min_rate, max_rate);
 
   /* EM (for the category weights) + Brent or BFGS (for the category rates) co-optimization */
-  cur_logl = -1 * corax_treeinfo_compute_loglh(treeinfo, 0);
+  cur_logl = corax_treeinfo_compute_loglh(treeinfo, 0);
   DBG("corax_algo_opt_rates_weights_em_treeinfo: START: logLH = %.15lf\n",
       cur_logl);
 
@@ -1783,7 +1842,9 @@ double corax_algo_opt_rates_weights_em_treeinfo(corax_treeinfo_t *treeinfo,
     xopt = (double *) calloc(em_data->total_rate_cats, sizeof(double));
   }
 
+  unsigned int loop_it = 0;
   do {
+    printf("\t \t EM loop it %u logLh = %f\n", ++loop_it, cur_logl);
     prev_logl = cur_logl;
 
     double loglh_before_weights = corax_treeinfo_compute_loglh_flex(treeinfo, 0, 0);
@@ -1881,12 +1942,17 @@ double corax_algo_opt_rates_weights_em_treeinfo(corax_treeinfo_t *treeinfo,
                                               (void *) &opt_params,
                                               target_func_multidim_treeinfo);
     }
+
+    /* now re-normalize rates and scale the branches accordingly */
+    renormalize_free_rates(treeinfo);
+
     cur_logl = corax_treeinfo_compute_loglh(treeinfo, 0);
+    printf("\t \t EM after loop it %u logLh = %f\n", loop_it, cur_logl);
 
     DBG("corax_algo_opt_rates_weights_em_treeinfo: AFTER RATES: logLH = %.15lf\n",
         cur_logl);
 
-  } while (prev_logl - cur_logl > tolerance);
+  } while (cur_logl - prev_logl  > tolerance && loop_it < 1);
 
   if (use_brent) {
     /* brent multi parameters from rate optimization */
@@ -1897,8 +1963,6 @@ double corax_algo_opt_rates_weights_em_treeinfo(corax_treeinfo_t *treeinfo,
     free(opt_mask);
   }
 
-  /* now re-normalize rates and scale the branches accordingly */
-  renormalize_free_rates(treeinfo);
 
   /* update pmatrices and partials according to the new branches */
   cur_logl = corax_treeinfo_compute_loglh(treeinfo, 0);

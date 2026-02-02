@@ -340,6 +340,7 @@ corax_opt_minimize_em_multipartition(corax_opt_multipart_em_data_t *data) {
 
         data->converged[p] = false;
     }
+    total_steps = 1;
 
     bool all_partitions_converged = false;
     for (unsigned int step = 0; (step < total_steps) && !all_partitions_converged; ++step) {
@@ -347,7 +348,7 @@ corax_opt_minimize_em_multipartition(corax_opt_multipart_em_data_t *data) {
 
         // Expectation step
         double *persite_lnl = NULL;
-        #ifdef CORAX_DEBUG
+        #ifdef DEBUG
         persite_lnl = (double *) calloc(data->pattern_weight_sum_per_part[0], sizeof(double));
         double **persite_lnl_part = &persite_lnl;
         corax_treeinfo_compute_loglh_persite(data->treeinfo, 0, 1, persite_lnl_part);
@@ -357,7 +358,7 @@ corax_opt_minimize_em_multipartition(corax_opt_multipart_em_data_t *data) {
 
         free(persite_lnl);
 
-        #ifdef CORAX_DEBUG
+        #ifdef DEBUG
         if (fabs(loglh - summed_loglh) > 1e-3) {
             printf("transform_sitecatlh_to_posterior loglh ≠ summed (%f ≠ %f)\n", loglh, summed_loglh);
         }

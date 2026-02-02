@@ -380,7 +380,7 @@ brent_opt_alt(unsigned int xnum,
 
     target_funk(params, u, fu, converged);
 
-    DBG("iter: %d, u: %lf, fu: %lf\n", iter_num, u[2], fu[2]);
+    //DBG("iter: %d, u: %lf, fu: %lf\n", iter_num, u[2], fu[2]);
 
     /* last element in converged[] array is "all converged" flag */
     iterate = !converged[xnum];

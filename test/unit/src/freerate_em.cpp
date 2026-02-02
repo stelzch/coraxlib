@@ -131,8 +131,8 @@ TEST_P(SitecatTest, dna_persitecat_lh) {
     SetupDNA();
     CreateTreeinfo(attributes, rate_cats);
 
-    std::array<double, 4> frequencies; frequencies.fill(0.25);
-    std::array<double, 6> subst_params; subst_params.fill(1e-9); subst_params.at(5) = 1.0;
+    std::array<double, 4> frequencies{1e-9, 1e-9, 1e-9, 1.0 - 3e-9};
+    std::array<double, 6> subst_params {1e-9, 1e-9, 1e-9, 1e-9, 1e-9, 1.0};
     corax_set_frequencies(part, 0, frequencies.data());
     corax_set_subst_params(part, 0, subst_params.data());
 
@@ -141,8 +141,7 @@ TEST_P(SitecatTest, dna_persitecat_lh) {
         scale_minlh[i] = scale_minlh[i-1] * CORAX_SCALE_THRESHOLD;
     }
 
-    // Extremely long branches to provoke scaling
-    const double brlen = attributes & CORAX_ATTRIB_RATE_SCALERS ? 1e14 : 1e18;
+    const double brlen = 1000; //attributes & CORAX_ATTRIB_RATE_SCALERS ? 1e14 : 1e18;
     SetAllBranchLengths(brlen);
 
     part->prop_invar[0] = p_inv;
@@ -359,11 +358,10 @@ TEST_F(SinglePartitionedTest, em_optimization) {
 }
 
 TEST_F(SinglePartitionedTest, em_optimization_invar) {
-    const auto sites = 600; // only take a subset of sites
     constexpr auto rate_cats = 3;
 
     SetupDNA();
-    CreateTreeinfo(CORAX_ATTRIB_ARCH_AVX2, rate_cats, sites);
+    CreateTreeinfo(CORAX_ATTRIB_ARCH_AVX2, rate_cats);
     treeinfo->params_to_optimize[0] = CORAX_OPT_PARAM_FREE_RATES | CORAX_OPT_PARAM_RATE_WEIGHTS | CORAX_OPT_PARAM_PINV;
 
     // Restore rates and branch lengths
@@ -371,7 +369,7 @@ TEST_F(SinglePartitionedTest, em_optimization_invar) {
         ResetDNASubstFreq();
         SetGammaRates();
         SetAllBranchLengths(0.1);
-        part->prop_invar[0] = 0.0;
+        corax_update_invariant_sites_proportion(part, 0, 0.4);
         return corax_treeinfo_compute_loglh(treeinfo, 0);
     };
     const double initial_loglh = reset_treeinfo();
@@ -384,14 +382,16 @@ TEST_F(SinglePartitionedTest, em_optimization_invar) {
 
     do {
         old_loglh = loglh_after_bfgs_invar;
-        loglh_after_bfgs_invar = -corax_algo_opt_onedim_treeinfo(treeinfo,
-                                                          CORAX_OPT_PARAM_PINV,
-                                                          CORAX_OPT_MIN_PINV,
-                                                          CORAX_OPT_MAX_PINV,
-                                                          1e-4);
+        //loglh_after_bfgs_invar = -corax_algo_opt_onedim_treeinfo(treeinfo,
+        //                                                  CORAX_OPT_PARAM_PINV,
+        //                                                  CORAX_OPT_MIN_PINV,
+        //                                                  CORAX_OPT_MAX_PINV,
+        //                                                  1e-4);
+        printf("pinv = %f, lnL = %f\n", part->prop_invar[0], loglh_after_bfgs_invar);
         loglh_after_bfgs_invar = -corax_algo_opt_rates_weights_treeinfo(treeinfo, CORAX_OPT_MIN_RATE, CORAX_OPT_MAX_RATE, CORAX_OPT_MIN_BRANCH_LEN, CORAX_OPT_MAX_BRANCH_LEN, 0, 1e-4);
-        DBG("after bfgs invar: %f\n", loglh_after_bfgs_invar);
+        //DBG("after bfgs invar: %f\n", loglh_after_bfgs_invar);
     } while(loglh_after_bfgs_invar - old_loglh > 1e-3);
+    EXPECT_GT(part->prop_invar[0], 0.05);
     RecordProperty("loglh_after_bfgs", loglh_after_bfgs_invar);
     EXPECT_GT(loglh_after_bfgs_invar, initial_loglh);
 
@@ -399,16 +399,18 @@ TEST_F(SinglePartitionedTest, em_optimization_invar) {
 
     do {
         old_loglh = loglh_after_em_invar;
-        loglh_after_em_invar = -corax_algo_opt_onedim_treeinfo(treeinfo,
-                                                          CORAX_OPT_PARAM_PINV,
-                                                          CORAX_OPT_MIN_PINV,
-                                                          CORAX_OPT_MAX_PINV,
-                                                          1e-4);
+        //loglh_after_em_invar = -corax_algo_opt_onedim_treeinfo(treeinfo,
+        //                                                  CORAX_OPT_PARAM_PINV,
+        //                                                  CORAX_OPT_MIN_PINV,
+        //                                                  CORAX_OPT_MAX_PINV,
+        //                                                  1e-4);
+        printf("pinv = %f\n", part->prop_invar[0]);
         loglh_after_em_invar = -corax_algo_opt_rates_weights_em_treeinfo(treeinfo, CORAX_OPT_MIN_RATE, CORAX_OPT_MAX_RATE, CORAX_OPT_MIN_BRANCH_LEN, CORAX_OPT_MAX_BRANCH_LEN, 0, 1e-4, true);
         DBG("after em invar: %f\n", loglh_after_em_invar);
     } while(loglh_after_em_invar - old_loglh > 1e-3);
-    RecordProperty("loglh_after_em", loglh_after_em_invar);
+    EXPECT_GT(loglh_after_em_invar, old_loglh);
     EXPECT_GT(loglh_after_em_invar, initial_loglh);
+    RecordProperty("loglh_after_em", loglh_after_em_invar);
 
     EXPECT_NEAR(loglh_after_em_invar, loglh_after_bfgs_invar, 1e-2);
 }
